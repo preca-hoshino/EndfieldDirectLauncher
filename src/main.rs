@@ -48,11 +48,7 @@ use std::ptr::null_mut;
 
 /// Exactly the argument vector the official chain uses:
 /// `games.log` -> `cgsu create game process ... strCmdLine:"...\Endfield.exe" -launcher_lang=zh-cn -launcher_sub_channel=1`
-///
-/// Local patch: `-force-d3d11` is appended so the game comes up on D3D11 instead of its default
-/// Vulkan backend. Vulkan capture needs the debug layer enabled, which is visible to the game's
-/// anti-tamper, so RenderDuck must hook the D3D11 path instead.
-const LAUNCHER_ARGS: &str = "-launcher_lang=zh-cn -launcher_sub_channel=1 -force-d3d11";
+const BASE_LAUNCHER_ARGS: &str = "-launcher_lang=zh-cn -launcher_sub_channel=1";
 
 /// Executables inside the game directory that carry the publisher's signature and can therefore
 /// stand in as the parent. They are only ever copied and suspended, never resumed. Ordered by
@@ -487,8 +483,13 @@ fn kill_placeholder_with_us(process: HANDLE) {
     }
 }
 
-/// Start `Endfield.exe` with `parent` as its reported parent process.
-fn start_game(game_exe: &Path, game_dir: &Path, parent: HANDLE) -> Result<Child, String> {
+/// Start `Endfield.exe` with `parent` as its reported parent process and `launcher_args`.
+fn start_game(
+    game_exe: &Path,
+    game_dir: &Path,
+    parent: HANDLE,
+    launcher_args: &str,
+) -> Result<Child, String> {
     let mut list_size = 0usize;
     unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut list_size) };
     let align = std::mem::size_of::<usize>();
@@ -521,7 +522,7 @@ fn start_game(game_exe: &Path, game_dir: &Path, parent: HANDLE) -> Result<Child,
     }
 
     let application = wide_path(game_exe);
-    let mut command_line = wide_command_line(game_exe, LAUNCHER_ARGS);
+    let mut command_line = wide_command_line(game_exe, launcher_args);
     let cwd = wide_path(game_dir);
 
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
@@ -580,36 +581,134 @@ fn clear_steam_appid_hint(game_dir: &Path) {
 
 // ---------------------------------------------------------------- entry point
 
-fn arg_value(args: &[String], name: &str) -> Option<String> {
-    let index = args.iter().position(|a| a == name)?;
-    args.get(index + 1).cloned()
+/// Quote a single command-line argument according to Windows CRT / CommandLineToArgvW rules
+/// so arguments with spaces or quotes survive intact.
+fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !arg.contains([' ', '\t', '\n', '\r', '"']) {
+        return arg.to_string();
+    }
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else if c == '"' {
+            quoted.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+            backslashes = 0;
+            quoted.push('"');
+        } else {
+            quoted.extend(std::iter::repeat('\\').take(backslashes));
+            backslashes = 0;
+            quoted.push(c);
+        }
+    }
+    quoted.extend(std::iter::repeat('\\').take(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+struct CliConfig {
+    game_dir: Option<PathBuf>,
+    passthrough: Vec<String>,
+}
+
+fn parse_cli_args(raw_args: &[String]) -> CliConfig {
+    let mut game_dir = None;
+    let mut passthrough = Vec::new();
+    let mut i = 0;
+    let mut pass_all_remaining = false;
+
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
+
+        if pass_all_remaining {
+            passthrough.push(arg.clone());
+            i += 1;
+            continue;
+        }
+
+        if arg == "--" {
+            pass_all_remaining = true;
+            i += 1;
+            continue;
+        }
+
+        if arg == "--console" || arg == "--help" || arg == "-h" {
+            i += 1;
+        } else if let Some(val) = arg.strip_prefix("--game-dir=") {
+            game_dir = Some(PathBuf::from(val));
+            i += 1;
+        } else if arg == "--game-dir" {
+            if i + 1 < raw_args.len() {
+                game_dir = Some(PathBuf::from(&raw_args[i + 1]));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            passthrough.push(arg.clone());
+            i += 1;
+        }
+    }
+
+    CliConfig {
+        game_dir,
+        passthrough,
+    }
+}
+
+fn build_game_command_line(passthrough: &[String]) -> String {
+    let mut args = String::from(BASE_LAUNCHER_ARGS);
+    for arg in passthrough {
+        args.push(' ');
+        args.push_str(&quote_arg(arg));
+    }
+    args
 }
 
 fn help_text() -> String {
     "\
-EndfieldDirectLauncher — starts Endfield.exe without the official launcher UI.
+EndfieldDirectLauncher - Direct launcher for Arknights: Endfield
 
-Run it from the game directory (the folder holding Endfield.exe).
+USAGE:
+    EndfieldDirectLauncher.exe [OPTIONS] [--] [GAME_ARGS]...
 
-Options:
-  --console                 attach a console window for progress/errors
-  --game-dir <dir>          directory containing Endfield.exe (default: this exe's folder)
-  --help                    show this text
+DESCRIPTION:
+    Starts Endfield.exe directly, bypassing the official Hypergryph launcher UI.
+    Satisfies OneChannelLC.dll verification by staging a publisher-signed executable
+    as a suspended pseudoparent process (Games.exe).
 
-How it works:
-  The game's OneChannelLC.dll requires its parent process to be named Games.exe and to
-  carry the publisher's signature. This tool copies a signed executable out of the game
-  directory to a temporary Games.exe, starts it suspended, and creates Endfield.exe with
-  PROC_THREAD_ATTRIBUTE_PARENT_PROCESS pointing at it, so both checks pass while no code
-  of that binary ever runs."
-        .to_string()
+OPTIONS:
+    --console            Attach a console window for real-time progress and logs
+    --game-dir <DIR>     Path to the directory containing Endfield.exe
+                         (default: directory containing this executable)
+    -h, --help           Print help information
+    --                   Stop option parsing; forward all following arguments to game
+
+GAME ARGUMENTS (Unity):
+    All arguments not consumed by the launcher are forwarded directly to Endfield.exe:
+      -force-vulkan      Use Vulkan graphics backend (game default)
+      -force-d3d11       Force DirectX 11 graphics backend
+      -force-d3d12       Attempt DirectX 12 graphics backend
+      -popupwindow       Borderless windowed fullscreen mode
+      -screen-width <W>  Set window width (e.g. -screen-width 1920)
+      -screen-height <H> Set window height (e.g. -screen-height 1080)
+
+EXAMPLES:
+    EndfieldDirectLauncher.exe
+    EndfieldDirectLauncher.exe --console
+    EndfieldDirectLauncher.exe -popupwindow -force-d3d11
+    EndfieldDirectLauncher.exe --game-dir \"D:\\Games\\Endfield Game\" -- -popupwindow
+"
+    .to_string()
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    let game_dir = match arg_value(args, "--game-dir") {
-        Some(dir) => PathBuf::from(dir),
-        None => exe_dir(),
-    };
+    let cli = parse_cli_args(args);
+    let game_dir = cli.game_dir.unwrap_or_else(exe_dir);
     let game_exe = game_dir.join("Endfield.exe");
     if !game_exe.is_file() {
         return Err(format!(
@@ -619,6 +718,9 @@ fn run(args: &[String]) -> Result<(), String> {
         ));
     }
     log(&format!("game exe  : {}", game_exe.display()));
+
+    let game_args = build_game_command_line(&cli.passthrough);
+    log(&format!("game args : {}", game_args));
 
     let parent_exe = stage_parent_exe(&game_dir)?;
     let mut parent = match start_suspended_pseudoparent(&parent_exe) {
@@ -632,7 +734,7 @@ fn run(args: &[String]) -> Result<(), String> {
     // the job of the parent named in `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, so assigning the
     // placeholder to the job any earlier would put the game in it as well — and then killing
     // this program would kill the game, which is the opposite of what the job is for.
-    let mut game = match start_game(&game_exe, &game_dir, parent.process) {
+    let mut game = match start_game(&game_exe, &game_dir, parent.process, &game_args) {
         Ok(child) => child,
         Err(error) => {
             unsafe { TerminateProcess(parent.process, 0) };
