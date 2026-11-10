@@ -13,7 +13,11 @@
 
 ### 1. 下载与放置
 
-从仓库 [Releases](../../releases) 下载 `EndfieldDirectLauncher.exe`，放入游戏根目录（即与 `Endfield.exe` 同一级）：
+从仓库 [Releases](../../releases) 下载对应架构的可执行文件：
+- **常规 PC (x64)**：下载 `EndfieldDirectLauncher.exe`（或 `EndfieldDirectLauncher-x64.exe`）
+- **ARM64 设备 (骁龙 X Elite / Surface 等)**：下载 `EndfieldDirectLauncher-arm64.exe`
+
+将下载的程序放入游戏根目录（即与 `Endfield.exe` 同一级）：
 
 ```text
 Hypergryph Launcher/games/Endfield Game/
