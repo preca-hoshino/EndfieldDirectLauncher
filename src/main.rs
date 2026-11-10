@@ -48,7 +48,11 @@ use std::ptr::null_mut;
 
 /// Exactly the argument vector the official chain uses:
 /// `games.log` -> `cgsu create game process ... strCmdLine:"...\Endfield.exe" -launcher_lang=zh-cn -launcher_sub_channel=1`
-const LAUNCHER_ARGS: &str = "-launcher_lang=zh-cn -launcher_sub_channel=1";
+///
+/// Local patch: `-force-d3d11` is appended so the game comes up on D3D11 instead of its default
+/// Vulkan backend. Vulkan capture needs the debug layer enabled, which is visible to the game's
+/// anti-tamper, so RenderDuck must hook the D3D11 path instead.
+const LAUNCHER_ARGS: &str = "-launcher_lang=zh-cn -launcher_sub_channel=1 -force-d3d11";
 
 /// Executables inside the game directory that carry the publisher's signature and can therefore
 /// stand in as the parent. They are only ever copied and suspended, never resumed. Ordered by

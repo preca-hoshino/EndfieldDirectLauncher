@@ -1,0 +1,77 @@
+name: Release on Main Push
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate Version Tag
+        shell: bash
+        run: |
+          # 1. 动态提取 Cargo.toml 中的版本号（例如 0.1.2）
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          
+          # 2. 获取 6 位短 commit SHA
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
+          
+          # 3. 构造方案 B 规范版本号：v<Cargo版本>-b<构建编号>-<6位短Hash>
+          RELEASE_TAG="v${CARGO_VERSION}-b${{ github.run_number }}-${SHORT_SHA}"
+          
+          echo "CARGO_VERSION=${CARGO_VERSION}" >> $GITHUB_ENV
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Publish New Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          cat << EOF > release_notes.md
+          ### 自动构建更新
+          - **项目基础版本**: \`v${CARGO_VERSION}\`
+          - **构建序号**: \`#${{ github.run_number }}\`
+          - **提交短哈希**: \`${SHORT_SHA}\`
+          - **最新提交**:
+          > ${COMMIT_MSG}
+
+          > *注：为保持 Releases 页面整洁，历史旧构建已自动清理，当前仅保留最新一次发布。*
+          EOF
+
+          # 使用 GitHub CLI 发布 Release 并上传可执行文件
+          gh release create "${RELEASE_TAG}" \
+            target/release/EndfieldDirectLauncher.exe \
+            --title "EndfieldDirectLauncher ${RELEASE_TAG}" \
+            --notes-file release_notes.md
+
+      - name: Delete Older Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "正在清理旧的 Release 和 Git Tag，仅保留最新版本..."
+          # 列出所有非当前 RELEASE_TAG 的 Release 并执行删除（同时删除对应的 git tag）
+          gh release list --limit 100 --json tagName --jq ".[].tagName | select(. != \"${RELEASE_TAG}\")" | while read -r old_tag; do
+            if [ -n "$old_tag" ]; then
+              echo "Deleting old release and tag: $old_tag"
+              gh release delete "$old_tag" --yes --cleanup-tag || true
+            fi
+          done
