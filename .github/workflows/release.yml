@@ -46,20 +46,16 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           cat << EOF > release_notes.md
-          ### 自动构建更新
-          - **项目基础版本**: \`v${CARGO_VERSION}\`
-          - **构建序号**: \`#${{ github.run_number }}\`
-          - **提交短哈希**: \`${SHORT_SHA}\`
-          - **最新提交**:
-          > ${COMMIT_MSG}
+          下载 \`EndfieldDirectLauncher.exe\` 放到游戏目录（与 \`Endfield.exe\` 同一层）双击即可直接启动游戏。
 
-          > *注：为保持 Releases 页面整洁，历史旧构建已自动清理，当前仅保留最新一次发布。*
+          **更新日志**：
+          > ${COMMIT_MSG}
           EOF
 
           # 使用 GitHub CLI 发布 Release 并上传可执行文件
           gh release create "${RELEASE_TAG}" \
             target/release/EndfieldDirectLauncher.exe \
-            --title "EndfieldDirectLauncher ${RELEASE_TAG}" \
+            --title "${RELEASE_TAG}" \
             --notes-file release_notes.md
 
       - name: Delete Older Releases
